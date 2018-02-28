@@ -1,0 +1,242 @@
+#!/bin/bash
+
+set -e
+shopt -s extglob
+
+API=https://api.trello.com/1
+declare -A param
+
+
+info()
+{
+	echo "$0: $*" >&2
+}
+
+warnx()
+{
+	echo "$0: $*" >&2
+}
+
+errx()
+{
+	warnx "$@"
+	exit -1
+}
+
+match()
+{
+	local pattern=$2
+	if [ "${pattern:0:1}" = '^' ]
+	then
+		pattern=${pattern:1}
+	else
+		pattern=".*$pattern"
+	fi
+	expr "$1" : "$pattern" >/dev/null
+}
+
+apicall()
+{
+	local endpoint param method=GET GETparams
+	declare -a curlArgs
+	
+	endpoint=$1
+	shift
+	
+	if match "$endpoint" '^/\?[^/]\+$'
+	then
+		# one-componenet endpoints always get POSTed
+		method=POST
+	fi
+	
+	for param in "$@"
+	do
+		if [ "$method" = GET ]
+		then
+			GETparams="&$param"
+		else
+			curlArgs+=(-d "$param")
+		fi
+	done
+	
+	curlArgs+=(-X "$method")
+	
+	warnx "Calling /$endpoint?$GETparams ${curlArgs[@]}"
+	
+	curl -sS $API/$endpoint?"key=$TRELLO_KEY&token=$TRELLO_TOKEN&$GETparams" "${curlArgs[@]}"
+}
+
+
+validate_id()
+{
+	if [ -z "$2" -o "$2" = null ]
+	then
+		errx Could not get $1 Id
+	fi
+	echo "$2"
+}
+
+_get_board_id()
+{
+	apicall members/me/boards | jq -r ".[] | select(.name == \"$1\") | .id"
+}
+
+get_board_id()
+{
+	validate_id Board `_get_board_id "$@"`
+}
+
+_get_list_id()
+{
+	apicall boards/$1/lists | jq -r ".[] | select(.name == \"$2\") | .id"
+}
+
+get_list_id()
+{
+	validate_id List `_get_list_id "$@"`
+}
+
+_mk_label()
+{
+	apicall labels idBoard="$1" name="$2" color="$3" | jq -r '.id'
+}
+
+mk_label()
+{
+	validate_id Label `_mk_label "$@"`
+}
+
+_get_label_id()
+{
+	local condition name color=null id
+	if match "$2" /
+	then
+		name=${2%/*}
+		color=${2#*/}
+		condition=".name == \"$name\" and .color == \"$color\""
+	else
+		name=$2
+		condition=".name == \"$2\""
+	fi
+	apicall boards/$1/labels | jq -r ".[] | select($condition) | .id"
+}
+
+get_label_id()
+{
+	validate_id Label `_get_label_id "$@"`
+}
+
+
+mkget_label_id()
+{
+	id=`get_label_id "$@"`
+	if [ -z "$id" ]
+	then
+		id=`mk_label "$1" "$name" "$color"`
+	fi
+	echo $id
+}
+
+get_member_id()
+{
+	local memberid urls
+	for memberid in `apicall batch/ urls=/members/me/boards,/members/me/organizations |\
+	  jq -r '.[]."200"[].memberships[].idMember' |\
+	  sort -u`
+	do
+		urls=$urls${urls:+,}/members/$memberid
+	done
+	apicall batch/ urls=$urls |\
+	  jq -r ".[].\"200\" | select(.fullName == \"$1\" or .username == \"$1\") | .id"
+	#FIXME multi response
+}
+
+
+if [ -z "$TRELLO_KEY" ]
+then
+	errx Environment TRELLO_KEY is not set. Go to "https://trello.com/app-key" to get one.
+fi
+if [ -z "$TRELLO_TOKEN" ]
+then
+	errx Environment TRELLO_TOKEN is not set. Go to "$API/authorize?expiration=never&name=Trello+CLI+running+on+$(hostname)&scope=read,write&response_type=token&key=$TRELLO_KEY" to get one.
+fi
+
+while [ $# -ge 1 ]
+do
+	opt=$1
+	shift
+	if [ $# = 0 ]
+	then
+		errx "Missing value for '$opt'"
+	fi
+	val=$1
+	shift
+	
+	case "$opt" in
+	--title|--name)
+		param[name]=$val
+		;;
+	--desc|--description)
+		param[desc]=$val
+		;;
+	--pos|--position)
+		case "$val" in
+		top|bottom|+([0-9]))
+			param[pos]=$val
+			;;
+		*)
+			errx "Invalid position '$val', choose 'top', 'bottom', or an integer"
+			;;
+		esac
+		;;
+	--due)
+		param[due]=`TZ=UTC date +"%Y-%m-%dT%H:%M:%SZ" -d "$val $(date +%z)"`
+		;;
+	--board)
+		boardid=`get_board_id "$val"`
+		;;
+	--list)
+		param[idList]=`get_list_id "$boardid" "$val"`
+		;;
+	--members)
+		param[idMembers]=${param[idMembers]}${param[idMembers]:+,}`get_member_id "$val"`
+		;;
+	--label)
+		param[idLabels]=${param[idLabels]}${param[idLabels]:+,}`mkget_label_id "$boardid" "$val"`
+		;;
+	*)
+		errx "Invalid option '$opt'"
+		;;
+	esac
+done
+
+
+
+if [ -z "$boardid" ]
+then
+	warnx Missing --board BoardName, choose one:
+	apicall members/me/boards | jq -r '.[] | .name' >&2
+	exit 10
+elif [ -z "${param[idList]}" ]
+then
+	warnx Missing --list ListName, choose one:
+	apicall boards/$boardid/lists | jq -r '.[] | .name' >&2
+	exit 11
+fi
+
+
+
+params=()
+for pkey in  "${!param[@]}"
+do
+	params+=("$pkey=${param[$pkey]}")
+done
+
+id=`apicall cards "${params[@]}" | jq -r '.id'`
+if [ -n "$id" -a "$id" != null ]
+then
+	info New card created: $id
+else
+	errx Failed to create card
+fi
+
