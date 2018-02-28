@@ -9,12 +9,12 @@ declare -A param
 
 info()
 {
-	echo "$0: $*" >&2
+	echo "${0##*/}: $*" >&2
 }
 
 warnx()
 {
-	echo "$0: $*" >&2
+	echo "${0##*/}: $*" >&2
 }
 
 debug()
@@ -303,7 +303,15 @@ do
 			;;
 		--due)
 			# Convert date-time phrase given on cli from local timezone to UTC.
-			param[due]=`TZ=UTC date +"%Y-%m-%dT%H:%M:%SZ" -d "$val $(date +%z)"`
+			fmt=%Y-%m-%dT%H:%M:%SZ
+			date=`TZ=UTC date +"$fmt" -d "$val $(date +%z)" || true`
+			if [ -z "$date" ]
+			then
+				# try without timezone spec
+				warnx Computing date without specifying timezone
+				date=`TZ=UTC date +"$fmt" -d "$val"`
+			fi
+			param[due]=$date
 			;;
 		--board)
 			boardid=`get_board_id "$val"`
