@@ -17,6 +17,14 @@ warnx()
 	echo "$0: $*" >&2
 }
 
+debug()
+{
+	if [ "$DEBUG" ]
+	then
+		warnx "$*"
+	fi
+}
+
 errx()
 {
 	warnx "$@"
@@ -37,23 +45,37 @@ match()
 
 apicall()
 {
-	local endpoint param method=GET GETparams
+	local endpoint param method urlparams
 	declare -a curlArgs
 	
+	if match "$1" '[A-Z]'
+	then
+		# if first argment is UPPER CASE, take it as call method
+		method=$1
+		shift
+	fi
+	
+	# first argument (after optional method name) is the endpoint path
 	endpoint=$1
 	shift
 	
-	if match "$endpoint" '^/\?[^/]\+$'
+	if [ -z "$method" ]
 	then
-		# one-componenet endpoints always get POSTed
-		method=POST
+		# default method is GET
+		method=GET
+		
+		if match "$endpoint" '^/\?[^/]\+$'
+		then
+			# one-componenet endpoints always get POSTed (unless method explicitely set)
+			method=POST
+		fi
 	fi
 	
 	for param in "$@"
 	do
 		if [ "$method" = GET ]
 		then
-			GETparams="&$param"
+			urlparams="$urlparams${urlparams:+&}$param"
 		else
 			curlArgs+=(-d "$param")
 		fi
@@ -61,9 +83,8 @@ apicall()
 	
 	curlArgs+=(-X "$method")
 	
-	warnx "Calling /$endpoint?$GETparams ${curlArgs[@]}"
-	
-	curl -sS $API/$endpoint?"key=$TRELLO_KEY&token=$TRELLO_TOKEN&$GETparams" "${curlArgs[@]}"
+	debug "Calling /$endpoint?$urlparams ${curlArgs[@]}"
+	curl -sS $API/$endpoint?"key=$TRELLO_KEY&token=$TRELLO_TOKEN&$urlparams" "${curlArgs[@]}"
 }
 
 
@@ -126,7 +147,6 @@ get_label_id()
 	validate_id Label `_get_label_id "$@"`
 }
 
-
 mkget_label_id()
 {
 	id=`get_label_id "$@"`
@@ -135,6 +155,18 @@ mkget_label_id()
 		id=`mk_label "$1" "$name" "$color"`
 	fi
 	echo $id
+}
+
+_get_card_id()
+{
+	local boardid=$1 condition=$2
+	apicall boards/$boardid/cards | jq -r ".[] | select($condition) | .id"
+	#FIXME multi response
+}
+
+get_card_id()
+{
+	validate_id Card `_get_card_id "$@"`
 }
 
 get_member_id()
@@ -152,6 +184,57 @@ get_member_id()
 }
 
 
+report_not_null()
+{
+	if [ -n "$1" -a "$1" != null ]
+	then
+		info "$2"
+	else
+		errx "$3"
+	fi
+}
+
+report_true()
+{
+	if [ "$1" = true ]
+	then
+		info "$2"
+	else
+		errx "$3"
+	fi
+}
+
+
+
+for opt in "$@"
+do
+	case "$opt" in
+	help|--help|-h|-\?)
+		echo \
+'Actions:
+  add-card
+  archive-card
+Options:
+  --id [id]
+  --title, --name [text]
+  --desc [text]
+  --position [top | bottom | <n>]
+  --due [local date time]
+  --board [board name]
+  --list [list name]
+  --members [full name | user name]
+  --label <label>[/color]
+Environments:
+  DEBUG
+  TRELLO_KEY
+  TRELLO_TOKEN
+  TRELLO_BOARD_ID'
+  		exit -1
+	;;
+	esac
+done
+
+
 if [ -z "$TRELLO_KEY" ]
 then
 	errx Environment TRELLO_KEY is not set. Go to "https://trello.com/app-key" to get one.
@@ -161,48 +244,83 @@ then
 	errx Environment TRELLO_TOKEN is not set. Go to "$API/authorize?expiration=never&name=Trello+CLI+running+on+$(hostname)&scope=read,write&response_type=token&key=$TRELLO_KEY" to get one.
 fi
 
+
+
+
+# Process cli arguments
+
+
+action=''
+boardid=${TRELLO_BOARD_ID:-}
+return_type=''
+
+
 while [ $# -ge 1 ]
 do
 	opt=$1
 	shift
-	if [ $# = 0 ]
-	then
-		errx "Missing value for '$opt'"
-	fi
-	val=$1
-	shift
 	
 	case "$opt" in
-	--title|--name)
-		param[name]=$val
+	add-card|archive-card)
+		action=$opt
+		if [ "$opt" = archive-card ]
+		then
+			param[closed]=true
+		fi
 		;;
-	--desc|--description)
-		param[desc]=$val
-		;;
-	--pos|--position)
-		case "$val" in
-		top|bottom|+([0-9]))
-			param[pos]=$val
+	-*)
+		if [ $# = 0 ]
+		then
+			errx "Missing value for '$opt'"
+		fi
+		val=$1
+		shift
+		
+		case "$opt" in
+		--id)
+			param[id]=$val
+			;;
+		--title|--name)
+			if [ "$action" = archive-card ]
+			then
+				param[id]=`get_card_id "$boardid" ".name == \"$val\""`
+			else
+				param[name]=$val
+			fi
+			;;
+		--desc|--description)
+			param[desc]=$val
+			;;
+		--pos|--position)
+			case "$val" in
+			top|bottom|+([0-9]))
+				param[pos]=$val
+				;;
+			*)
+				errx "Invalid position '$val', choose 'top', 'bottom', or an integer"
+				;;
+			esac
+			;;
+		--due)
+			# Convert date-time phrase given on cli from local timezone to UTC.
+			param[due]=`TZ=UTC date +"%Y-%m-%dT%H:%M:%SZ" -d "$val $(date +%z)"`
+			;;
+		--board)
+			boardid=`get_board_id "$val"`
+			;;
+		--list)
+			param[idList]=`get_list_id "$boardid" "$val"`
+			;;
+		--members)
+			param[idMembers]=${param[idMembers]}${param[idMembers]:+,}`get_member_id "$val"`
+			;;
+		--label)
+			param[idLabels]=${param[idLabels]}${param[idLabels]:+,}`mkget_label_id "$boardid" "$val"`
 			;;
 		*)
-			errx "Invalid position '$val', choose 'top', 'bottom', or an integer"
+			errx "Invalid option '$opt'"
 			;;
 		esac
-		;;
-	--due)
-		param[due]=`TZ=UTC date +"%Y-%m-%dT%H:%M:%SZ" -d "$val $(date +%z)"`
-		;;
-	--board)
-		boardid=`get_board_id "$val"`
-		;;
-	--list)
-		param[idList]=`get_list_id "$boardid" "$val"`
-		;;
-	--members)
-		param[idMembers]=${param[idMembers]}${param[idMembers]:+,}`get_member_id "$val"`
-		;;
-	--label)
-		param[idLabels]=${param[idLabels]}${param[idLabels]:+,}`mkget_label_id "$boardid" "$val"`
 		;;
 	*)
 		errx "Invalid option '$opt'"
@@ -212,31 +330,49 @@ done
 
 
 
-if [ -z "$boardid" ]
-then
-	warnx Missing --board BoardName, choose one:
-	apicall members/me/boards | jq -r '.[] | .name' >&2
-	exit 10
-elif [ -z "${param[idList]}" ]
-then
-	warnx Missing --list ListName, choose one:
-	apicall boards/$boardid/lists | jq -r '.[] | .name' >&2
-	exit 11
-fi
+# Verify mandatory parameters for each action
+
+case "$action" in
+	add-card)
+		if [ -z "$boardid" ]
+		then
+			warnx Missing --board BoardName, choose one:
+			apicall members/me/boards | jq -r '.[] | .name' >&2
+			exit 10
+		fi
+		if [ -z "${param[idList]}" ]
+		then
+			warnx Missing --list ListName, choose one:
+			apicall boards/$boardid/lists | jq -r '.[] | .name' >&2
+			exit 11
+		fi
+		;;
+esac
 
 
+
+# Assemble parameters
 
 params=()
-for pkey in  "${!param[@]}"
+for pkey in "${!param[@]}"
 do
 	params+=("$pkey=${param[$pkey]}")
 done
 
-id=`apicall cards "${params[@]}" | jq -r '.id'`
-if [ -n "$id" -a "$id" != null ]
-then
-	info New card created: $id
-else
-	errx Failed to create card
-fi
+
+# Perform action
+
+case "$action" in
+	add-card)
+		id=`apicall cards "${params[@]}" | jq -r '.id'`
+		report_not_null "$id" "New card created: $id" "Failed to create card"
+		;;
+	archive-card)
+		resp=`apicall PUT cards/${param[id]}/closed value=true | jq -r .closed`
+		report_true "$resp" "Card archived" "Failed to archive card"
+		;;
+	*)
+		errx Action was not given.
+		;;
+esac
 
