@@ -319,7 +319,7 @@ do
 		--list)
 			param[idList]=`get_list_id "$boardid" "$val"`
 			;;
-		--members)
+		--member)
 			param[idMembers]=${param[idMembers]}${param[idMembers]:+,}`get_member_id "$val"`
 			;;
 		--label)
