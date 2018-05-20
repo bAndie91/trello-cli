@@ -99,7 +99,7 @@ validate_id()
 
 _get_board_id()
 {
-	apicall members/me/boards | jq -r ".[] | select(.name == \"$1\") | .id"
+	apicall members/me/boards | jq -r ".[] | select(.name|contains(\"$1\")) | .id" | head -n1
 }
 
 get_board_id()
@@ -109,7 +109,7 @@ get_board_id()
 
 _get_list_id()
 {
-	apicall boards/$1/lists | jq -r ".[] | select(.name == \"$2\") | .id"
+	apicall boards/$1/lists | jq -r ".[] | select(.name|contains(\"$2\")) | .id" | head -n1
 }
 
 get_list_id()
@@ -204,6 +204,12 @@ report_true()
 	fi
 }
 
+_list_boards()
+{
+	apicall members/me/boards/ filter=open |\
+	jq -r "sort_by(.dateLastActivity) | reverse | .[] | [.id, .dateLastActivity, .name] | join(\" \")"
+}
+
 
 
 for opt in "$@"
@@ -214,6 +220,9 @@ do
 'Actions:
   add-card
   archive-card
+  list-boards
+  list-cards
+  show-card
 Options:
   --id [id]
   --title, --name [text]
@@ -261,7 +270,7 @@ do
 	shift
 	
 	case "$opt" in
-	add-card|archive-card)
+	add-card|archive-card|list-boards|list-cards|show-card|list)
 		action=$opt
 		if [ "$opt" = archive-card ]
 		then
@@ -341,17 +350,17 @@ done
 # Verify mandatory parameters for each action
 
 case "$action" in
-	add-card)
+	add-card|list-cards)
 		if [ -z "$boardid" ]
 		then
 			warnx Missing --board BoardName, choose one:
-			apicall members/me/boards | jq -r '.[] | .name' >&2
+			apicall members/me/boards | jq -r '.[] | .name' | sort >&2
 			exit 10
 		fi
 		if [ -z "${param[idList]}" ]
 		then
 			warnx Missing --list ListName, choose one:
-			apicall boards/$boardid/lists | jq -r '.[] | .name' >&2
+			apicall boards/$boardid/lists | jq -r '.[] | .name' | sort >&2
 			exit 11
 		fi
 		;;
@@ -378,6 +387,33 @@ case "$action" in
 	archive-card)
 		resp=`apicall PUT cards/${param[id]}/closed value=true | jq -r .closed`
 		report_true "$resp" "Card archived" "Failed to archive card"
+		;;
+	list-boards)
+		_list_boards
+		;;
+	list)
+		_list_boards |\
+		while read -r boardid datetime boardname
+		do
+			echo "$boardname"
+			apicall boards/$boardid/lists filter=open |\
+				jq -r '.[] | .name' |\
+				sed -e 's/^/	/'
+		done
+		;;
+	list-cards)
+		apicall lists/${param[idList]}/cards |\
+			jq -r '[
+				sort_by(.due)|reverse|.[]|[
+					"[34;1m" + .name + " [30;1m" + .url + "[m",
+					if .due then "Due: " + .due else null end,
+					if .labels[] then "Labels: " + ([.labels[].name] | join(" ")) else null end,
+					if .desc and .desc!="" then "Description: \n" + ([.desc | split("\n") | .[] | "  "+.] | join("\n")) else null end,
+					""
+				]|.[]|
+				select(.)
+			]|
+			join("\n")'
 		;;
 	*)
 		errx Action was not given.
