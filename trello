@@ -223,6 +223,7 @@ do
   list-boards
   list-cards
   show-card
+  show-attachments
 Options:
   --id [id]
   --title, --name [text]
@@ -270,12 +271,10 @@ do
 	shift
 	
 	case "$opt" in
-	add-card|archive-card|list-boards|list-cards|show-card|list)
+	add-card|archive-card|list-boards|list-cards|show-card|show-attachments|show-files|list)
 		action=$opt
-		if [ "$opt" = archive-card ]
-		then
-			param[closed]=true
-		fi
+		if [ "$action" = archive-card ]; then param[closed]=true; fi
+		if [ "$action" = show-files ]; then action=show-attachments; fi
 		;;
 	-*)
 		if [ $# = 0 ]
@@ -290,12 +289,14 @@ do
 			param[id]=$val
 			;;
 		--title|--name)
-			if [ "$action" = archive-card ]
-			then
+			case "$action" in
+			archive-card|show-attachments)
 				param[id]=`get_card_id "$boardid" ".name == \"$val\""`
-			else
+				;;
+			*)
 				param[name]=$val
-			fi
+				;;
+			esac
 			;;
 		--desc|--description)
 			param[desc]=$val
@@ -414,6 +415,10 @@ case "$action" in
 				select(.)
 			]|
 			join("\n")'
+		;;
+	show-attachments)
+		apicall cards/${param[id]}/attachments |\
+			jq -r '.[] | ["- " + .name, "  " + .url, ""] | join("\n")'
 		;;
 	*)
 		errx Action was not given.
