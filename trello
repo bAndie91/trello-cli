@@ -224,6 +224,7 @@ do
   list-cards
   show-card
   show-attachments
+  get-board-data
 Options:
   --id [id]
   --title, --name [text]
@@ -271,7 +272,7 @@ do
 	shift
 	
 	case "$opt" in
-	add-card|archive-card|list-boards|list-cards|show-card|show-attachments|show-files|list)
+	add-card|archive-card|list-boards|list-cards|show-card|show-attachments|show-files|list|get-board-data)
 		action=$opt
 		if [ "$action" = archive-card ]; then param[closed]=true; fi
 		if [ "$action" = show-files ]; then action=show-attachments; fi
@@ -350,20 +351,46 @@ done
 
 # Verify mandatory parameters for each action
 
+assert_boardid()
+{
+	if [ -z "$boardid" ]
+	then
+		warnx Missing --board BoardName, choose one:
+		apicall members/me/boards | jq -r '.[] | .name' | sort >&2
+		exit 10
+	fi
+}
+assert_listid()
+{
+	if [ -z "${param[idList]}" ]
+	then
+		warnx Missing --list ListName, choose one:
+		apicall boards/$boardid/lists | jq -r '.[] | .name' | sort >&2
+		exit 11
+	fi
+}
+assert_id()
+{
+	if [ -z "${param[id]}" ]
+	then
+		warnx Missing --id Id
+		exit 12
+	fi
+}
+
 case "$action" in
-	add-card|list-cards)
-		if [ -z "$boardid" ]
-		then
-			warnx Missing --board BoardName, choose one:
-			apicall members/me/boards | jq -r '.[] | .name' | sort >&2
-			exit 10
-		fi
-		if [ -z "${param[idList]}" ]
-		then
-			warnx Missing --list ListName, choose one:
-			apicall boards/$boardid/lists | jq -r '.[] | .name' | sort >&2
-			exit 11
-		fi
+	add-card)
+		assert_boardid
+		assert_listid
+		;;
+	archive-card|show-attachments)
+		assert_id
+		;;
+	list-cards)
+		assert_listid
+		;;
+	get-board-data)
+		assert_boardid
 		;;
 esac
 
@@ -419,6 +446,19 @@ case "$action" in
 	show-attachments)
 		apicall cards/${param[id]}/attachments |\
 			jq -r '.[] | ["- " + .name, "  " + .url, ""] | join("\n")'
+		;;
+	get-board-data)
+		apicall boards/$boardid \
+			actions=all \
+			actions_limit=1000 \
+			card_attachment_fields=all \
+			cards=all \
+			lists=all \
+			members=all \
+			member_fields=all \
+			card_attachment_fields=all \
+			checklists=all \
+			fields=all
 		;;
 	*)
 		errx Action was not given.
