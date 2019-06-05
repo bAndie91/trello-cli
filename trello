@@ -206,7 +206,7 @@ report_true()
 
 _list_boards()
 {
-	apicall members/me/boards/ filter=open |\
+	apicall members/me/boards/ filter=open fields=dateLastActivity,name |\
 	jq -r "sort_by(.dateLastActivity) | reverse | .[] | [.id, .dateLastActivity, .name] | join(\" \")"
 }
 
@@ -225,6 +225,7 @@ do
   show-card
   show-attachments
   get-board-data
+  list-board-orgs
 Options:
   --id [id]
   --title, --name [text]
@@ -272,7 +273,7 @@ do
 	shift
 	
 	case "$opt" in
-	add-card|archive-card|list-boards|list-cards|show-card|show-attachments|show-files|list|get-board-data)
+	add-card|archive-card|list-boards|list-cards|show-card|show-attachments|show-files|list|get-board-data|list-board-orgs)
 		action=$opt
 		if [ "$action" = archive-card ]; then param[closed]=true; fi
 		if [ "$action" = show-files ]; then action=show-attachments; fi
@@ -326,6 +327,9 @@ do
 			;;
 		--board)
 			boardid=`get_board_id "$val"`
+			;;
+		--board-id)
+			boardid=$val
 			;;
 		--list)
 			param[idList]=`get_list_id "$boardid" "$val"`
@@ -415,6 +419,30 @@ case "$action" in
 	archive-card)
 		resp=`apicall PUT cards/${param[id]}/closed value=true | jq -r .closed`
 		report_true "$resp" "Card archived" "Failed to archive card"
+		;;
+	list-board-orgs)
+		apicall members/me/boards/ filter=open fields=name,idOrganization |\
+			jq -r ".[] | [.id, (.idOrganization | tostring), .name] | join(\" \")" |{
+				declare -A orgname
+				while read -r boardid orgid boardname
+				do
+					if [ "$orgid" = null ]
+					then
+						echo "$boardid	private	-	$boardname"
+					else
+						if [ -z "${orgname[$orgid]}" ]
+						then
+							name=`apicall "organization/$orgid" fields=displayName | jq -r .displayName`
+							if [ -z "$name" ]
+							then
+								errx "could not query name of organization $orgid"
+							fi
+							orgname[$orgid]=$name
+						fi
+						echo "$boardid	team	${orgname[$orgid]}	$boardname"
+					fi
+				done
+			}
 		;;
 	list-boards)
 		_list_boards

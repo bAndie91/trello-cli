@@ -1,0 +1,19 @@
+#!/bin/bash
+
+set -e
+set -u
+set -o pipefail
+
+datetime=`date +%Y-%m-%d_%H-%M-%S`
+
+trello list-board-orgs |\
+while IFS=$'\t' read -r boardid sharetype team boardname
+do
+	[ "$team" = - ] && team='' || true
+	
+	boarddir=$sharetype/$team${team:+/}$boardname
+	mkdir -p "$boarddir"
+	
+	echo "Saving board $boarddir …" >&2
+	trello get-board-data --board-id "$boardid" >"$boarddir/$datetime.json"
+done
